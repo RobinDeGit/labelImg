@@ -133,6 +133,7 @@ class PascalVocReader:
         self.shapes = []
         self.filepath = filepath
         self.verified = False
+        self.imgSize = None
         try:
             self.parseXML()
         except:
@@ -161,6 +162,11 @@ class PascalVocReader:
         except KeyError:
             self.verified = False
 
+        for object_iter in xmltree.findall('size'):
+            width = object_iter.find("width").text
+            height = object_iter.find("height").text
+            self.imgSize = (width, height)
+            
         for object_iter in xmltree.findall('object'):
             bndbox = object_iter.find("bndbox")
             label = object_iter.find('name').text

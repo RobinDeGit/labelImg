@@ -45,9 +45,404 @@ __appname__ = 'labelImg'
 
 # Utility functions and classes.
 
+
+
+
+if sys.byteorder == 'little':
+    _bgra = (0, 1, 2, 3)
+else:
+    _bgra = (3, 2, 1, 0)
+
+
+try:
+    _basestring = basestring
+except NameError:
+    # 'basestring' undefined, must be Python 3
+    _basestring = str
+
+def _normalize255(array, normalize, clip = (0, 255)):
+    if normalize:
+        if normalize is True:
+            normalize = array.min(), array.max()
+            if clip == (0, 255):
+                clip = None
+        elif np.isscalar(normalize):
+            normalize = (0, normalize)
+
+        nmin, nmax = normalize
+
+        if nmin:
+            array = array - nmin
+
+        if nmax != nmin:
+            scale = 255. / (nmax - nmin)
+            if scale != 1.0:
+                array = array * scale
+
+    if clip:
+        low, high = clip
+        np.clip(array, low, high, array)
+
+    return array
+
+    
+def rgb2qimage(rgb):
+    """Convert the 3D numpy array `rgb` into a 32-bit QImage.  `rgb` must
+    have three dimensions with the vertical, horizontal and RGB image axes.
+    
+    ATTENTION: This QImage carries an attribute `ndimage` with a
+    reference to the underlying numpy array that holds the data. On
+    Windows, the conversion into a QPixmap does not copy the data, so
+    that you have to take care that the QImage does not get garbage
+    collected (otherwise PyQt will throw away the wrapper, effectively
+    freeing the underlying memory - boom!)."""
+    if len(rgb.shape) != 3:
+        raise ValueError("rgb2QImage can only convert 3D arrays")
+    if rgb.shape[2] not in (3, 4):
+        raise ValueError("rgb2QImage can expects the last dimension to contain exactly three (R,G,B) or four (R,G,B,A) channels")
+
+    h, w, channels = rgb.shape
+
+    # Qt expects 32bit BGRA data for color images:
+    bgra = numpy.empty((h, w, 4), numpy.uint8, 'C')
+    bgra[...,0] = rgb[...,2]
+    bgra[...,1] = rgb[...,1]
+    bgra[...,2] = rgb[...,0]
+    if rgb.shape[2] == 3:
+        bgra[...,3].fill(255)
+        fmt = QtGui.QImage.Format_RGB32
+    else:
+        bgra[...,3] = rgb[...,3]
+        fmt = QtGui.QImage.Format_ARGB32
+
+    result = QtGui.QImage(bgra.data, w, h, fmt)
+    result.ndarray = bgra
+    return result
+
+
+
+def PyQt_data(image):
+    # PyQt4/PyQt5's QImage.bits() returns a sip.voidptr that supports
+    # conversion to string via asstring(size) or getting its base
+    # address via int(...):
+    return (int(image.bits()), False)
+
+def _re_buffer_address_match(buf_repr):
+    import re
+    _re_buffer_address = re.compile('<read-write buffer ptr 0x([0-9a-fA-F]*),')
+    global _re_buffer_address_match
+    _re_buffer_address_match = _re_buffer_address.match
+    return _re_buffer_address_match(buf_repr)
+
+def PySide_data(image):
+    # PySide's QImage.bits() returns a buffer object like this:
+    # <read-write buffer ptr 0x7fc3f4821600, size 76800 at 0x111269570>
+    ma = _re_buffer_address_match(repr(image.bits()))
+    assert ma, 'could not parse address from %r' % (image.bits(), )
+    return (int(ma.group(1), 16), False)
+
+def direct_buffer_data(image):
+    return image.bits()
+
+
+
+validFormats_8bit = [getattr(QImage, name) for name in ('Format_Indexed8', 'Format_Grayscale8') if name in dir(QImage)]
+validFormats_32bit = (QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_ARGB32_Premultiplied)
+
+def qimageview(image):
+    if not isinstance(image, QImage):
+        raise TypeError("image argument must be a QImage instance")
+
+    shape = image.height(), image.width()
+    strides0 = image.bytesPerLine()
+
+    format = image.format()
+    if format in validFormats_8bit:
+        dtype = "|u1"
+        strides1 = 1
+    elif format in validFormats_32bit:
+        dtype = "|u4"
+        strides1 = 4
+    elif format == QImage.Format_Invalid:
+        raise ValueError("qimageview got invalid QImage")
+    else:
+        raise ValueError("qimageview can only handle 8- or 32-bit QImages (format was %r)" % format)
+
+    image.__array_interface__ = {
+        'shape': shape,
+        'typestr': dtype,
+        'data': PyQt_data(image),
+        'strides': (strides0, strides1),
+        'version': 3,
+    }
+
+    result = np.asarray(image)
+    del image.__array_interface__
+    return result
+
+
+
+def _qimage_or_filename_view(qimage):
+    if isinstance(qimage, _basestring):
+        qimage = _qt.QImage(qimage)
+    return qimageview(qimage)
+
+def raw_view(qimage):
+    """Returns raw 2D view of the given QImage_'s memory.  The result
+    will be a 2-dimensional numpy.ndarray with an appropriately sized
+    integral dtype.  (This function is not intented to be used
+    directly, but used internally by the other -- more convenient --
+    view creation functions.)
+
+    :param qimage: image whose memory shall be accessed via NumPy
+    :type qimage: QImage_
+    :rtype: numpy.ndarray_ with shape (height, width)"""
+    return _qimage_or_filename_view(qimage)
+
+
+def byte_view(qimage, byteorder = 'little'):
+    """Returns raw 3D view of the given QImage_'s memory.  This will
+    always be a 3-dimensional numpy.ndarray with dtype numpy.uint8.
+    
+    Note that for 32-bit images, the last dimension will be in the
+    [B,G,R,A] order (if little endian) due to QImage_'s memory layout
+    (the alpha channel will be present for Format_RGB32 images, too).
+
+    For 8-bit (indexed) images, the array will still be 3-dimensional,
+    i.e. shape will be (height, width, 1).
+
+    The order of channels in the last axis depends on the `byteorder`,
+    which defaults to 'little', i.e. BGRA order.  You may set the
+    argument `byteorder` to 'big' to get ARGB, or use None which means
+    sys.byteorder here, i.e. return native order for the machine the
+    code is running on.
+
+    For your convenience, `qimage` may also be a filename, see
+    `Loading and Saving Images`_ in the documentation.
+
+    :param qimage: image whose memory shall be accessed via NumPy
+    :type qimage: QImage_
+    :param byteorder: specify order of channels in last axis
+    :rtype: numpy.ndarray_ with shape (height, width, 1 or 4) and dtype uint8"""
+    raw = _qimage_or_filename_view(qimage)
+    result = raw.view(np.uint8).reshape(raw.shape + (-1, ))
+    if byteorder and byteorder != sys.byteorder:
+        result = result[...,::-1]
+    return result
+
+
+def rgb_view(qimage, byteorder = 'big'):
+    """Returns RGB view of a given 32-bit color QImage_'s memory.
+    Similarly to byte_view(), the result is a 3D numpy.uint8 array,
+    but reduced to the rgb dimensions (without alpha), and reordered
+    (using negative strides in the last dimension) to have the usual
+    [R,G,B] order.  The image must have 32 bit pixel size, i.e. be
+    RGB32, ARGB32, or ARGB32_Premultiplied.  (Note that in the latter
+    case, the values are of course premultiplied with alpha.)
+
+    The order of channels in the last axis depends on the `byteorder`,
+    which defaults to 'big', i.e. RGB order.  You may set the argument
+    `byteorder` to 'little' to get BGR, or use None which means
+    sys.byteorder here, i.e. return native order for the machine the
+    code is running on.
+
+    For your convenience, `qimage` may also be a filename, see
+    `Loading and Saving Images`_ in the documentation.
+
+    :param qimage: image whose memory shall be accessed via NumPy
+    :type qimage: QImage_ with 32-bit pixel type
+    :param byteorder: specify order of channels in last axis
+    :rtype: numpy.ndarray_ with shape (height, width, 3) and dtype uint8"""
+    if byteorder is None:
+        byteorder = sys.byteorder
+    bytes = byte_view(qimage, byteorder)
+    if bytes.shape[2] != 4:
+        raise ValueError("For rgb_view, the image must have 32 bit pixel size (use RGB32, ARGB32, or ARGB32_Premultiplied)")
+
+    if byteorder == 'little':
+        return bytes[...,:3] # strip A off BGRA
+    else:
+        return bytes[...,1:] # strip A off ARGB
+
+
+
+def alpha_view(qimage):
+    """Returns alpha view of a given 32-bit color QImage_'s memory.
+    The result is a 2D numpy.uint8 array, equivalent to
+    byte_view(qimage)[...,3].  The image must have 32 bit pixel size,
+    i.e. be RGB32, ARGB32, or ARGB32_Premultiplied.  Note that it is
+    not enforced that the given qimage has a format that actually
+    *uses* the alpha channel -- for Format_RGB32, the alpha channel
+    usually contains 255 everywhere.
+
+    For your convenience, `qimage` may also be a filename, see
+    `Loading and Saving Images`_ in the documentation.
+
+    :param qimage: image whose memory shall be accessed via NumPy
+    :type qimage: QImage_ with 32-bit pixel type
+    :rtype: numpy.ndarray_ with shape (height, width) and dtype uint8"""
+    bytes = byte_view(qimage, byteorder = None)
+    if bytes.shape[2] != 4:
+        raise ValueError("For alpha_view, the image must have 32 bit pixel size (use RGB32, ARGB32, or ARGB32_Premultiplied)")
+    return bytes[...,_bgra[3]]
+
+
+
+def byte_view(qimage, byteorder = 'little'):
+    """Returns raw 3D view of the given QImage_'s memory.  This will
+    always be a 3-dimensional numpy.ndarray with dtype numpy.uint8.
+    
+    Note that for 32-bit images, the last dimension will be in the
+    [B,G,R,A] order (if little endian) due to QImage_'s memory layout
+    (the alpha channel will be present for Format_RGB32 images, too).
+
+    For 8-bit (indexed) images, the array will still be 3-dimensional,
+    i.e. shape will be (height, width, 1).
+
+    The order of channels in the last axis depends on the `byteorder`,
+    which defaults to 'little', i.e. BGRA order.  You may set the
+    argument `byteorder` to 'big' to get ARGB, or use None which means
+    sys.byteorder here, i.e. return native order for the machine the
+    code is running on.
+
+    For your convenience, `qimage` may also be a filename, see
+    `Loading and Saving Images`_ in the documentation.
+
+    :param qimage: image whose memory shall be accessed via NumPy
+    :type qimage: QImage_
+    :param byteorder: specify order of channels in last axis
+    :rtype: numpy.ndarray_ with shape (height, width, 1 or 4) and dtype uint8"""
+    raw = _qimage_or_filename_view(qimage)
+    result = raw.view(np.uint8).reshape(raw.shape + (-1, ))
+    if byteorder and byteorder != sys.byteorder:
+        result = result[...,::-1]
+    return result
+
+
+def array2qimage(array, normalize = False):
+    """Convert a 2D or 3D numpy array into a 32-bit QImage_.  The
+    first dimension represents the vertical image axis; the optional
+    third dimension is supposed to contain 1-4 channels:
+
+    ========= ===================
+    #channels interpretation
+    ========= ===================
+            1 scalar/gray
+            2 scalar/gray + alpha
+            3 RGB
+            4 RGB + alpha
+    ========= ===================
+
+    Scalar data will be converted into corresponding gray RGB triples;
+    if you want to convert to an (indexed) 8-bit image instead, use
+    `gray2qimage` (which cannot support an alpha channel though).
+
+    The parameter `normalize` can be used to normalize an image's
+    value range to 0..255:
+
+    `normalize` = (nmin, nmax):
+      scale & clip image values from nmin..nmax to 0..255
+
+    `normalize` = nmax:
+      lets nmin default to zero, i.e. scale & clip the range 0..nmax
+      to 0..255
+
+    `normalize` = True:
+      scale image values to 0..255 (same as passing (array.min(),
+      array.max()))
+
+    If `array` contains masked values, the corresponding pixels will
+    be transparent in the result.  Thus, the result will be of
+    QImage.Format_ARGB32 if the input already contains an alpha
+    channel (i.e. has shape (H,W,4)) or if there are masked pixels,
+    and QImage.Format_RGB32 otherwise.
+
+    :param array: image data which should be converted (copied) into a QImage_
+    :type array: 2D or 3D numpy.ndarray_ or `numpy.ma.array <masked arrays>`_
+    :param normalize: normalization parameter (see above, default: no value changing)
+    :type normalize: bool, scalar, or pair
+    :rtype: QImage_ with RGB32 or ARGB32 format"""
+    if np.ndim(array) == 2:
+        array = array[...,None]
+    elif np.ndim(array) != 3:
+        raise ValueError("array2qimage can only convert 2D or 3D arrays (got %d dimensions)" % np.ndim(array))
+    if array.shape[2] not in (1, 2, 3, 4):
+        raise ValueError("array2qimage expects the last dimension to contain exactly one (scalar/gray), two (gray+alpha), three (R,G,B), or four (R,G,B,A) channels")
+
+    h, w, channels = array.shape
+
+    hasAlpha = np.ma.is_masked(array) or channels in (2, 4)
+    fmt = QImage.Format_ARGB32 if hasAlpha else QImage.Format_RGB32
+
+    result = QImage(w, h, fmt)
+
+    array = _normalize255(array, normalize)
+
+    if channels >= 3:
+        rgb_view(result)[:] = array[...,:3]
+    else:
+        rgb_view(result)[:] = array[...,:1] # scalar data
+
+    alpha = alpha_view(result)
+
+    if channels in (2, 4):
+        alpha[:] = array[...,-1]
+    else:
+        alpha[:] = 255
+
+    if np.ma.is_masked(array):
+        alpha[:]  *= np.logical_not(np.any(array.mask, axis = -1))
+
+    return result
+
+
+
+
+import cv2
+import numpy as np
+
+def pseudoRGB (img, method = "clahe", visualize = False):
+    if method not in ["clahe"]:
+        exit ("Pseudo RGB method " + str(method) + " is unknown.")
+
+    conversionFactor = 256 
+    if img.dtype == np.uint8:
+        conversionFactor  = 1
+        method = 'clahe'
+    
+    if method == "clahe":
+        if img.shape[0] > 512 or img.shape[1] > 512:
+            factor = max(img.shape[0], img.shape[1])/512
+            clipfactor = 256 
+        else:
+            factor = 1
+            clipfactor = 1
+            
+        clahe = cv2.createCLAHE(clipLimit=8.0*clipfactor, tileGridSize=(int(2*factor),int(2*factor)))
+        red = (clahe.apply(img)/conversionFactor ).astype('uint8')
+        clahe = cv2.createCLAHE(clipLimit=2.0*clipfactor, tileGridSize=(int(8*factor),int(8*factor)))
+        blue = (clahe.apply(img)/conversionFactor ).astype('uint8')
+        clahe = cv2.createCLAHE(clipLimit=4.0*clipfactor, tileGridSize=(int(4*factor),int(4*factor)))
+        green = (clahe.apply(img)/conversionFactor ).astype('uint8')
+        
+        img =  cv2.merge((blue, green, red))
+        
+        if visualize == True:
+            cv2.imshow('image512',img)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+            for i in range (1,5):
+                cv2.waitKey(1)
+
+    return img
+
+
+
+
 def have_qstring():
     '''p3/qt5 get rid of QString wrapper as py3 has native unicode str type'''
     return not (sys.version_info.major >= 3 or QT_VERSION_STR.startswith('5.'))
+
 
 def util_qt_strlistclass():
     return QStringList if have_qstring() else list
@@ -228,21 +623,50 @@ class MainWindow(QMainWindow, WindowMixin):
         verify = action('&Verify Image', self.verifyImg,
                         'space', 'verify', u'Verify Image')
 
-        save = action('&Save', self.saveFile,
-                      'Ctrl+S', 'save', u'Save labels to file', enabled=False)
 
-        saveAs = action('&Save As', self.saveFileAs,
-                        'Ctrl+Shift+S', 'save-as', u'Save labels to a different file', enabled=False)
+        scaleLeft = action('&Scale Left', self.scaleLeft,
+                        '4', 'verify', u'Scale Left')
+        scaleUp = action('&Scale Up', self.scaleUp,
+                        '8', 'verify', u'Scale Up')
+        scaleDown = action('&Scale Down', self.scaleDown,
+                        '2', 'verify', u'Scale Down')
+        scaleRight = action('&Scale Right', self.scaleRight,
+                        '6', 'verify', u'Scale Right')
 
-        close = action('&Close', self.closeFile, 'Ctrl+W', 'close', u'Close current file')
         
         resetAll = action('&ResetAll', self.resetAll, None, 'resetall', u'Reset all')
 
-        color1 = action('Box Line Color', self.chooseColor1,
+        upscaleAll = action('&Upscale All', self.upscaleAll,
+                        '+', 'verify', u'Upscall All')
+        downscaleAll = action('&Downscale All', self.downscaleAll,
+                        '-', 'verify', u'Downscale All')
+        moveLeft = action('&Move Left', self.moveLeft,
+                        'Left', 'verify', u'Move Left')
+        moveUp = action('&Move Up', self.moveUp,
+                        'Up', 'verify', u'Move Up')
+        moveDown = action('&Move Down', self.moveDown,
+                        'Down', 'verify', u'Move Down')
+        moveRight = action('&Move Right', self.moveRight,
+                        'Right', 'verify', u'Move Right')
+        flipHorizontal = action('&Shift horizontally', self.flipHorizontal,
+                        'Shift+H', 'verify', u'Shift horizontally')
+
+        save = action('&Save', self.saveFile,
+                      'Ctrl+S', 'save', u'Save labels to file', enabled=False)
+        saveAs = action('&Save As', self.saveFileAs,
+                        'Ctrl+Shift+S', 'save-as', u'Save labels to a different file',
+                        enabled=False)
+        loadTemplate = action('&Load Template', self.loadTemplate,
+                        'Ctrl+T', 'verify', u'Load Template')
+        close = action('&Close', self.closeFile,
+                       'Ctrl+W', 'close', u'Close current file')
+        color1 = action('Box &Line Color', self.chooseColor1,
                         'Ctrl+L', 'color_line', u'Choose Box line color')
+        color2 = action('Box &Fill Color', self.chooseColor2,
+                        'Ctrl+Shift+L', 'color', u'Choose Box fill color')
 
         createMode = action('Create\nRectBox', self.setCreateMode,
-                            'w', 'new', u'Start drawing Boxs', enabled=False)
+                            'Ctrl+N', 'new', u'Start drawing Boxs', enabled=False)
         editMode = action('&Edit\nRectBox', self.setEditMode,
                           'Ctrl+J', 'edit', u'Move and edit Boxs', enabled=False)
 
@@ -327,6 +751,7 @@ class MainWindow(QMainWindow, WindowMixin):
                               lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
                               createMode=createMode, editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
+                              loadTemplate=loadTemplate,
                               zoom=zoom, zoomIn=zoomIn, zoomOut=zoomOut, zoomOrg=zoomOrg,
                               fitWindow=fitWindow, fitWidth=fitWidth,
                               zoomActions=zoomActions,
@@ -334,7 +759,8 @@ class MainWindow(QMainWindow, WindowMixin):
                                   open, opendir, save, saveAs, close, resetAll, quit),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
-                                        None, color1),
+                                        None, color1, color2, upscaleAll, downscaleAll, scaleDown, scaleUp, scaleRight, scaleLeft,
+                                        moveDown, moveUp, moveRight, moveLeft, flipHorizontal ),
                               beginnerContext=(create, edit, copy, delete),
                               advancedContext=(createMode, editMode, edit, copy,
                                                delete, shapeLineColor, shapeFillColor),
@@ -362,7 +788,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lastLabel = None
 
         addActions(self.menus.file,
-                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, saveAs, close, resetAll, quit))
+                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, loadTemplate, save, saveAs, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
         addActions(self.menus.view, (
             self.autoSaving,
@@ -426,9 +852,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.statusBar().show()
 
         self.restoreState(settings.get(SETTING_WIN_STATE, QByteArray()))
-        Shape.line_color = self.lineColor = QColor(settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
-        Shape.fill_color = self.fillColor = QColor(settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
-        self.canvas.setDrawingColor(self.lineColor)
+        self.lineColor = QColor(settings.get(SETTING_LINE_COLOR, Shape.line_color))
+        self.fillColor = QColor(settings.get(SETTING_FILL_COLOR, Shape.fill_color))
+        Shape.line_color = self.lineColor
+        Shape.fill_color = self.fillColor
         # Add chris
         Shape.difficult = self.difficult
 
@@ -497,6 +924,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def setDirty(self):
         self.dirty = True
         self.actions.save.setEnabled(True)
+        self.updateLineColors()
 
     def setClean(self):
         self.dirty = False
@@ -600,10 +1028,10 @@ class MainWindow(QMainWindow, WindowMixin):
     def popLabelListMenu(self, point):
         self.menus.labelList.exec_(self.labelList.mapToGlobal(point))
 
-    def editLabel(self):
+    def editLabel(self, item=None):
         if not self.canvas.editing():
             return
-        item = self.currentItem()
+        item = item if item else self.currentItem()
         text = self.labelDialog.popUp(item.text())
         if text is not None:
             item.setText(text)
@@ -689,6 +1117,7 @@ class MainWindow(QMainWindow, WindowMixin):
             shape.difficult = difficult
             shape.close()
             s.append(shape)
+            self.addLabel(shape)
 
             if line_color:
                 shape.line_color = QColor(*line_color)
@@ -703,6 +1132,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.addLabel(shape)
 
         self.canvas.loadShapes(s)
+        self.updateLineColors()
 
     def saveLabels(self, annotationFilePath):
         annotationFilePath = ustr(annotationFilePath)
@@ -712,8 +1142,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         def format_shape(s):
             return dict(label=s.label,
-                        line_color=s.line_color.getRgb(),
-                        fill_color=s.fill_color.getRgb(),
+                        line_color=s.line_color.getRgb()
+                        if s.line_color != self.lineColor else None,
+                        fill_color=s.fill_color.getRgb()
+                        if s.fill_color != self.fillColor else None,
                         points=[(p.x(), p.y()) for p in s.points],
                        # add chris
                         difficult = s.difficult)
@@ -732,6 +1164,249 @@ class MainWindow(QMainWindow, WindowMixin):
         except LabelFileError as e:
             self.errorMessage(u'Error saving label data', u'<b>%s</b>' % e)
             return False
+
+
+    def loadTemplate (self):
+        self.labelList.clear()
+        scriptPath = os.path.dirname (os.path.realpath(__file__) )
+        xmlPath = os.path.join(scriptPath, "template.xml")
+        print ("Loading template from ", xmlPath)
+        if os.path.isfile(xmlPath):
+            self.loadPascalXMLByFilename(xmlPath)
+
+        # we want to resize all shapes to current image size 
+        if self.templateImgSize is not None:
+            print ("Size of the template image ", str(self.templateImgSize))
+            
+            # how big is our image?
+            print ("Size of loaded image: ", str(self.imgShape))
+            
+            # first we need the size of the template 
+            # we assume here that the orientation is correct already,
+            # so we ignore rotated images (which only appear in very few cases in our RNSA data set)
+            factorX = float(self.templateImgSize[0])/float(self.imgShape[1])
+            factorY = float(self.templateImgSize[1])/float(self.imgShape[0]) # these are swapped, size vs shape etc
+            print ("Scaling factor for X: ", str(factorX))
+            print ("Scaling factor for Y: ", str(factorY))
+            factor = factorY
+            if factorX > factorY:
+                factor = factorX
+            
+            for shape in self.canvas.shapes:
+                for p in shape.points:
+                    p.setX (p.x()/factor)
+                    p.setY (p.y()/factor)
+
+            if self.filePath:
+                print (self.filePath)
+                print (self.defaultSaveDir)
+                imgFileName = os.path.basename(self.filePath)
+                savedFileName = os.path.splitext(imgFileName)[0] + XML_EXT
+                savedFileName = os.path.join (os.path.dirname(self.filePath),  savedFileName)
+                print ("Saving XML to " + str(savedFileName ))
+                annotationFilePath = savedFileName 
+                self._saveFile(annotationFilePath)
+                self.setDirty()
+
+        self.labelList.clearSelection()
+
+        return True 
+    
+
+    def moveUp (self):
+        #print ("Moving UP")
+        for shape in self.canvas.shapes:
+            for p in shape.points:
+                p.setX(p.x()) 
+                p.setY(p.y()-25)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+    def moveLeft (self):
+        #print ("Moving LEFT")
+        for shape in self.canvas.shapes:
+            for p in shape.points:
+                p.setX(p.x()-25) 
+                p.setY(p.y())
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+    def moveRight (self):
+        #print ("Moving RIGHT")
+        for shape in self.canvas.shapes:
+            for p in shape.points:
+                p.setX(p.x()+25) 
+                p.setY(p.y())
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+
+    def flipHorizontal (self):
+        #print ("Flipping horizontally")
+        w2 = self.canvas.pixmap.width() - 0.0
+        h2 = self.canvas.pixmap.height() - 0.0
+        for shape in self.canvas.shapes:
+            for p in shape.points:
+                p.setX(w2 - p.x()) 
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+
+    def moveDown (self):
+        #print ("Moving DOWN")
+        for shape in self.canvas.shapes:
+            for p in shape.points:
+                p.setX(p.x()) 
+                p.setY(p.y()+25)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+
+
+    def upscaleX (self, factor, current = True):
+        for shape in self.canvas.shapes:
+            item = self.currentItem()
+            if item is not None:
+                if current == True:
+                    #print ("Compare" + str(shape.label) + " -- " + item.text())
+                    if shape.label != item.text():
+                        continue
+            minX = 999999999
+            maxX = -1
+            for p in shape.points:
+                minX = min(p.x(), minX)
+                maxX = max(p.x(), maxX)
+            distX = maxX - minX
+            
+            for p in shape.points:
+                if p.x() == minX:
+                    p.setX(minX - distX*factor)
+                if p.x() == maxX:
+                    p.setX(maxX + distX*factor)
+        return True
+
+
+
+    def upscaleY (self, factor, current = True):
+        for shape in self.canvas.shapes:
+            item = self.currentItem()
+            if item is not None:
+                if current == True:
+                    #print ("Compare" + str(shape.label) + " -- " + item.text())
+                    if shape.label != item.text():
+                        continue
+            minY = 999999999
+            maxY = -1
+            for p in shape.points:
+                minY = min(p.y(), minY)
+                maxY = max(p.y(), maxY)
+            distY = maxY - minY
+            
+            for p in shape.points:
+                if p.y() == minY:
+                    p.setY(minY - distY*factor)
+                if p.y() == maxY:
+                    p.setY(maxY + distY*factor)
+        return True
+
+
+            
+    def upscaleAll (self):
+        self.upscaleX(0.05)
+        self.upscaleY(0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+    def downscaleAll(self):
+        self.upscaleX(-0.05)
+        self.upscaleY(-0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+
+    def scaleUp (self):
+        #self.upscaleX(0.05)
+        self.upscaleY(0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+    def scaleDown (self):
+        #self.upscaleX(0.05)
+        self.upscaleY(-0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+    def scaleRight (self):
+        self.upscaleX(0.05)
+        #self.upscaleY(0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+    def scaleLeft (self):
+        self.upscaleX(-0.05)
+        #self.upscaleY(0.05)
+        self.setDirty()
+        self.paintCanvas()
+        return True
+
+
+
+        
+
+    def colorForKey (self, key):
+        r, g, b = 255, 255, 0
+        if key[:3] == "MCP":
+            r,g,b = 0, 163, 214 # cyan
+        if key[:3] == "PIP":
+            r,g,b = 212, 0, 179 # violet
+        if key[:3] == "Rad":
+            r,g,b = 253, 0, 0  # reddish
+        if key[:3] == "Uln":
+            r,g,b = 236, 179, 20  # goldish
+        if key[:3] == "Wri":
+            r,g,b = 0, 160, 0  # green
+        if key[:3] == "DIP": 
+            r,g,b = 255, 120, 0 #orange 
+        r,g,b = r/255, g/255, b/255
+        scaleFactor = 0
+        r = (1-scaleFactor)*r #+ scaleFactor*1
+        g = (1-scaleFactor)*g #+ scaleFactor*1
+        b = (1-scaleFactor)*b #+ scaleFactor*1
+        return r, g, b
+
+            
+    def updateLineColors (self):
+        for shape in self.canvas.shapes:
+            r, g, b = self.colorForKey (shape.label)
+            r = int(r*255)
+            g = int(g*255)
+            b = int(b*255)
+            #print (str(r)+","+ str(g)+"," +str(b))
+            shape.line_color = QColor( r, g, b)
+            shape.vertex_fill_color = QColor( r, g, b)
+            shape.fill_color = QColor( r, g, b, 50)
+            shape.select_fill_color = QColor( r, g, b, 96)
+            shape.hvertex_fill_color = QColor( r, g, b, 96)
+        return True
+            
+
+
+
 
     def copySelectedShape(self):
         self.addLabel(self.canvas.copySelectedShape())
@@ -880,6 +1555,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def loadFile(self, filePath=None):
         """Load the specified file, or the last opened file if None."""
+        print ("Reading from ", filePath)
         self.resetState()
         self.canvas.setEnabled(False)
         if filePath is None:
@@ -919,8 +1595,16 @@ class MainWindow(QMainWindow, WindowMixin):
                                   u"<p>Make sure <i>%s</i> is a valid image file." % unicodeFilePath)
                 self.status("Error reading %s" % unicodeFilePath)
                 return False
+            
+            # convrt back and forth 
+            rgbimage = cv2.imread(unicodeFilePath, 0)
+            rgbimage = pseudoRGB (rgbimage)
+            image = array2qimage (rgbimage, normalize = False)
+
+
             self.status("Loaded %s" % os.path.basename(unicodeFilePath))
             self.image = image
+            self.imgShape = rgbimage.shape # actually we could just look at the canvas but its ok this way too.
             self.filePath = unicodeFilePath
             self.canvas.loadPixmap(QPixmap.fromImage(image))
             if self.labelFile:
@@ -938,10 +1622,12 @@ class MainWindow(QMainWindow, WindowMixin):
                     basename = os.path.basename(
                         os.path.splitext(self.filePath)[0]) + XML_EXT
                     xmlPath = os.path.join(self.defaultSaveDir, basename)
+                    print ("Loading XML from ", xmlPath)
                     self.loadPascalXMLByFilename(xmlPath)
                 else:
                     xmlPath = os.path.splitext(filePath)[0] + XML_EXT
                     if os.path.isfile(xmlPath):
+                        print ("Loading XML from ", xmlPath)
                         self.loadPascalXMLByFilename(xmlPath)
 
             self.setWindowTitle(__appname__ + ' ' + filePath)
@@ -1252,8 +1938,17 @@ class MainWindow(QMainWindow, WindowMixin):
                                           default=DEFAULT_LINE_COLOR)
         if color:
             self.lineColor = color
-            Shape.line_color = color
-            self.canvas.setDrawingColor(color)
+            # Change the color for all shape lines:
+            Shape.line_color = self.lineColor
+            self.canvas.update()
+            self.setDirty()
+
+    def chooseColor2(self):
+        color = self.colorDialog.getColor(self.fillColor, u'Choose fill color',
+                                          default=DEFAULT_FILL_COLOR)
+        if color:
+            self.fillColor = color
+            Shape.fill_color = self.fillColor
             self.canvas.update()
             self.setDirty()
 
@@ -1307,6 +2002,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         tVocParseReader = PascalVocReader(xmlPath)
         shapes = tVocParseReader.getShapes()
+        self.templateImgSize = tVocParseReader.imgSize 
         self.loadLabels(shapes)
         self.canvas.verified = tVocParseReader.verified
 
