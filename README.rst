@@ -6,23 +6,23 @@ LabelImg for hand joints annotation
 This is a simple modification of LabelImg (see below) to allow for faster and easier hand joint annotations.
 The modifications are as follows:
 
-```
-- Ctrl+T        Load prespecified template. This will read the file "./template.xml" and scale the template to fit the size of the current image 
-- Up        Will move all boxes into the direction
-- Down      Will move all boxes into the direction
-- Left      Will move all boxes into the direction
-- Right     Will move all boxes into the direction
-- 2     Will shrink in height all boxes of the selected type
-- 4     Will shrink in width all boxes of the selected type
-- 6     Will enlarge in width all boxes of the selected type
-- 8     Will enlarge in height all boxes of the selected type
-- +     Will scale up either boxes of the selected type or all boxes
-- -     Will scale down either boxes of the selected type or all boxes
-- Shift+Up      Will move the selected box a tiny bit into the direction
-- Shift+Down    Will move the selected box a tiny bit into the direction
-- Shift+Left        Will move the selected box a tiny bit into the direction
-- Shift+Right       Will move the selected box a tiny bit into the direction
-- Shift+H       Flip all boxes horizontally.
+
+- ```Ctrl+T```        Load prespecified template. This will read the file "./template.xml" and scale the template to fit the size of the current image 
+- ```Up```        Will move all boxes into the direction
+- ```Down```      Will move all boxes into the direction
+- ```Left```      Will move all boxes into the direction
+- ```Right```     Will move all boxes into the direction
+- ```2```     Will shrink in height all boxes of the selected type
+- ```4```     Will shrink in width all boxes of the selected type
+- ```6```     Will enlarge in width all boxes of the selected type
+- ```8```     Will enlarge in height all boxes of the selected type
+- ```+```     Will scale up either boxes of the selected type or all boxes
+- ```-```    Will scale down either boxes of the selected type or all boxes
+- ```Shift+Up```      Will move the selected box a tiny bit into the direction
+- ```Shift+Down```    Will move the selected box a tiny bit into the direction
+- ```Shift+Left```        Will move the selected box a tiny bit into the direction
+- ```Shift+Right```       Will move the selected box a tiny bit into the direction
+- ```Shift+H```       Flip all boxes horizontally.
 ```
 
 
