@@ -6,6 +6,7 @@ LabelImg for hand joints annotation
 This is a simple modification of LabelImg (see below) to allow for faster and easier hand joint annotations.
 The modifications are as follows:
 
+```
 - Ctrl+T        Load prespecified template. This will read the file "./template.xml" and scale the template to fit the size of the current image 
 - Up        Will move all boxes into the direction
 - Down      Will move all boxes into the direction
@@ -22,6 +23,7 @@ The modifications are as follows:
 - Shift+Left        Will move the selected box a tiny bit into the direction
 - Shift+Right       Will move the selected box a tiny bit into the direction
 - Shift+H       Flip all boxes horizontally.
+```
 
 
 The colors of the different regions are hardcoded for now, they could easily be put into a settings screen, where the user can adapt all the colors by himself.
